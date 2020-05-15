@@ -28,11 +28,13 @@ type TimeWriter struct {
 	Compress   bool
 	ReserveDay int
 
-	curFilename string
-	file        *os.File
-	mu          sync.Mutex
-	startMill   sync.Once
-	millCh      chan bool
+	file           *os.File
+	curFileName    string
+	curFileModDate string
+
+	mu        sync.Mutex
+	startMill sync.Once
+	millCh    chan bool
 }
 
 func (l *TimeWriter) Write(p []byte) (n int, err error) {
@@ -46,7 +48,7 @@ func (l *TimeWriter) Write(p []byte) (n int, err error) {
 		}
 	}
 
-	if l.curFilename != l.filename() {
+	if l.curFileModDate != time.Now().Format("20060102") {
 		l.rotate()
 	}
 
@@ -80,6 +82,9 @@ func (l *TimeWriter) rotate() error {
 	if err := l.close(); err != nil {
 		return err
 	}
+	if err := l.rename(); err != nil {
+		return err
+	}
 	if err := l.openNew(); err != nil {
 		return err
 	}
@@ -93,7 +98,7 @@ func (l *TimeWriter) oldLogFiles() ([]logInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("can't read log file directory: %s", err)
 	}
-	logFiles := []logInfo{}
+	var logFiles []logInfo
 
 	prefix, ext := l.prefixAndExt()
 
@@ -101,7 +106,7 @@ func (l *TimeWriter) oldLogFiles() ([]logInfo, error) {
 		if f.IsDir() {
 			continue
 		}
-		if f.Name() == filepath.Base(l.curFilename) {
+		if f.Name() == filepath.Base(l.curFileName) {
 			continue
 		}
 		if t, err := l.timeFromName(f.Name(), prefix, ext); err == nil {
@@ -130,7 +135,7 @@ func (l *TimeWriter) timeFromName(filename, prefix, ext string) (time.Time, erro
 	if !strings.HasSuffix(filename, ext) {
 		return time.Time{}, errors.New("mismatched extension")
 	}
-	ts := filename[len(prefix) : len(filename)-len(ext)]
+	ts := filename[len(prefix)+1 : len(filename)-len(ext)]
 	if len(ts) != 8 {
 		return time.Time{}, errors.New("mismatched date")
 	}
@@ -154,9 +159,9 @@ func (l *TimeWriter) timeFromName(filename, prefix, ext string) (time.Time, erro
 }
 
 func (l *TimeWriter) prefixAndExt() (prefix, ext string) {
-	filename := filepath.Base(l.filename())
+	filename := filepath.Base(l.curFileName)
 	ext = filepath.Ext(filename)
-	prefix = filename[:len(filename)-len(ext)-8]
+	prefix = filename[:len(filename)-len(ext)-9]
 	return prefix, ext
 }
 
@@ -243,15 +248,19 @@ func (l *TimeWriter) openNew() error {
 	if err != nil {
 		return fmt.Errorf("can't open new logfile: %s", err)
 	}
-	l.curFilename = name
+
 	l.file = f
+	l.curFileName = name
+	l.curFileModDate = time.Now().Format("20060102")
 	return nil
 }
 
 func (l *TimeWriter) openExistingOrNew(writeLen int) error {
 
 	filename := l.filename()
-	if _, err := os.Stat(filename); os.IsNotExist(err) {
+
+	fileInfo, err := os.Stat(filename)
+	if os.IsNotExist(err) {
 		return l.openNew()
 	} else if err != nil {
 		return fmt.Errorf("error getting log file info: %s", err)
@@ -261,19 +270,30 @@ func (l *TimeWriter) openExistingOrNew(writeLen int) error {
 	if err != nil {
 		return l.openNew()
 	}
-	l.curFilename = filename
+
 	l.file = file
+	l.curFileName = filename
+	l.curFileModDate = fileInfo.ModTime().Format("20060102")
 	return nil
 }
 
 func (l *TimeWriter) filename() string {
-	year, month, day := time.Now().Date()
-	date := fmt.Sprintf("%04d%02d%02d", year, month, day)
-	name := fmt.Sprintf("%s.%s.log", filepath.Base(os.Args[0]), date)
+	name := fmt.Sprintf("%s.log", filepath.Base(os.Args[0]))
 	if l.Dir != "" {
 		return filepath.Join(l.Dir, name)
 	}
 	return filepath.Join(os.TempDir(), name)
+}
+
+func (l *TimeWriter) rename() error {
+	prefix, ext := l.prefixAndExt()
+	newName := filepath.Join(l.Dir, prefix+"."+l.curFileModDate+ext)
+	if _, err := os.Stat(newName); os.IsExist(err) {
+		_, err := mergeFile(l.curFileName, newName)
+		return err
+	} else {
+		return os.Rename(l.curFileName, newName)
+	}
 }
 
 func compressLogFile(src, dst string) (err error) {
@@ -321,6 +341,23 @@ func compressLogFile(src, dst string) (err error) {
 	}
 
 	return nil
+}
+
+func mergeFile(src, dst string) (int64, error) {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return 0, err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		return 0, err
+	}
+	defer dstFile.Close()
+
+	n, err := io.Copy(dstFile, srcFile)
+	return n, err
 }
 
 type logInfo struct {
