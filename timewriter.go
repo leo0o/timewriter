@@ -161,7 +161,7 @@ func (l *TimeWriter) timeFromName(filename, prefix, ext string) (time.Time, erro
 func (l *TimeWriter) prefixAndExt() (prefix, ext string) {
 	filename := filepath.Base(l.curFileName)
 	ext = filepath.Ext(filename)
-	prefix = filename[:len(filename)-len(ext)-1]
+	prefix = filename[:len(filename)-len(ext)]
 	return prefix, ext
 }
 
